@@ -63,7 +63,7 @@ def normalize(mapping):
 def get_effective_config(overrides):
     config = DEFAULTS.copy()
 
-    # Layer 2: environment-specific YAML
+    # 1. Environment-specific YAML
     env_name = os.getenv("APP_ENV", "development")
     yaml_path = BASE_DIR / f"config.{env_name}.yaml"
 
@@ -71,7 +71,7 @@ def get_effective_config(overrides):
         with yaml_path.open(encoding="utf-8") as f:
             config.update(normalize(yaml.safe_load(f) or {}))
 
-    # Layer 3: .env file
+    # 2. .env file
     file_env = dotenv_values(BASE_DIR / ".env")
     file_config = {}
 
@@ -85,24 +85,29 @@ def get_effective_config(overrides):
 
     config.update(normalize(file_config))
 
-    # Layer 4: OS environment variables
-    os_config = {}
-
-    for key, value in os.environ.items():
-        if key.startswith("APP_"):
-            os_config[key[4:]] = value
+    # 3. OS-level APP_* variables
+    os_config = {
+        key[4:]: value
+        for key, value in os.environ.items()
+        if key.startswith("APP_")
+    }
 
     if "NUM_WORKERS" in os.environ:
         os_config["workers"] = os.environ["NUM_WORKERS"]
 
     config.update(normalize(os_config))
 
-    # Layer 5: query overrides
+    # 4. CLI-style query overrides
     config.update(normalize(overrides))
 
-    # Mask the secret in every response
-    config["api_key"] = "*****"
-    return config
+    # Return exactly the required keys and types
+    return {
+        "port": int(config["port"]),
+        "workers": int(config["workers"]),
+        "debug": config["debug"],
+        "log_level": str(config["log_level"]),
+        "api_key": "*****",
+    }
 
 
 @app.get("/effective-config")
@@ -112,7 +117,6 @@ def effective_config(set: list[str] | None = Query(default=None)):
     for item in set or []:
         if "=" not in item:
             continue
-
         key, value = item.split("=", 1)
         key = normalize_key(key)
 
