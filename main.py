@@ -17,9 +17,7 @@ DEFAULTS = {
     "api_key": "default-secret-000",
 }
 
-ALIASES = {
-    "num_workers": "workers",
-}
+ALIASES = {"num_workers": "workers"}
 
 app = FastAPI(title="Effective Config API")
 
@@ -31,6 +29,11 @@ app.add_middleware(
 )
 
 
+def normalize_key(key):
+    key = str(key).strip().lower()
+    return ALIASES.get(key, key)
+
+
 def coerce(key, value):
     if key in ("port", "workers"):
         return int(value)
@@ -38,10 +41,10 @@ def coerce(key, value):
     if key == "debug":
         if isinstance(value, bool):
             return value
-        normalized = str(value).strip().lower()
-        if normalized in ("true", "1", "yes", "on"):
+        value = str(value).strip().lower()
+        if value in ("true", "1", "yes", "on"):
             return True
-        if normalized in ("false", "0", "no", "off"):
+        if value in ("false", "0", "no", "off"):
             return False
         raise ValueError(f"Invalid boolean: {value}")
 
@@ -50,16 +53,14 @@ def coerce(key, value):
 
 def normalize(mapping):
     result = {}
-    for key, value in mapping.items():
-        key = str(key).strip().lower()
-        key = ALIASES.get(key, key)
-        if key in DEFAULTS:
+    for raw_key, value in mapping.items():
+        key = normalize_key(raw_key)
+        if key in DEFAULTS and value is not None:
             result[key] = coerce(key, value)
     return result
 
 
 def get_effective_config(overrides):
-    # Layer 1: defaults
     config = DEFAULTS.copy()
 
     # Layer 2: environment-specific YAML
@@ -67,49 +68,45 @@ def get_effective_config(overrides):
     yaml_path = BASE_DIR / f"config.{env_name}.yaml"
 
     if yaml_path.exists():
-        with yaml_path.open(encoding="utf-8") as file:
-            yaml_config = yaml.safe_load(file) or {}
-        config.update(normalize(yaml_config))
+        with yaml_path.open(encoding="utf-8") as f:
+            config.update(normalize(yaml.safe_load(f) or {}))
 
     # Layer 3: .env file
     file_env = dotenv_values(BASE_DIR / ".env")
-    file_config = {
-        key.removeprefix("APP_").lower(): value
-        for key, value in file_env.items()
-        if key.startswith("APP_") and value is not None
-    }
+    file_config = {}
 
-    # Special alias: NUM_WORKERS -> workers
-    if file_env.get("NUM_WORKERS") is not None:
-        file_config["workers"] = file_env["NUM_WORKERS"]
+    for key, value in file_env.items():
+        if value is None:
+            continue
+        if key.startswith("APP_"):
+            file_config[key[4:]] = value
+        elif key == "NUM_WORKERS":
+            file_config["workers"] = value
 
     config.update(normalize(file_config))
 
-    # Layer 4: actual OS environment variables
-    os_config = {
-        key.removeprefix("APP_").lower(): value
-        for key, value in os.environ.items()
-        if key.startswith("APP_")
-    }
+    # Layer 4: OS environment variables
+    os_config = {}
+
+    for key, value in os.environ.items():
+        if key.startswith("APP_"):
+            os_config[key[4:]] = value
 
     if "NUM_WORKERS" in os.environ:
         os_config["workers"] = os.environ["NUM_WORKERS"]
 
     config.update(normalize(os_config))
 
-    # Layer 5: dynamic CLI-style query overrides
+    # Layer 5: query overrides
     config.update(normalize(overrides))
 
-    # Never expose the actual secret
+    # Mask the secret in every response
     config["api_key"] = "*****"
-
     return config
 
 
 @app.get("/effective-config")
-def effective_config(
-    set: list[str] | None = Query(default=None)
-):
+def effective_config(set: list[str] | None = Query(default=None)):
     overrides = {}
 
     for item in set or []:
@@ -117,8 +114,7 @@ def effective_config(
             continue
 
         key, value = item.split("=", 1)
-        key = key.strip().lower()
-        key = ALIASES.get(key, key)
+        key = normalize_key(key)
 
         if key in DEFAULTS:
             overrides[key] = value
